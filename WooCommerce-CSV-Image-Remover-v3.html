@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WooCommerce CSV Image Remover</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;font-family:Arial,Helvetica,sans-serif;background:#f4f6f8;color:#17202a}
+  .wrap{max-width:820px;margin:40px auto;padding:0 18px}
+  .card{background:#fff;border:1px solid #dfe5eb;border-radius:14px;padding:22px;box-shadow:0 8px 24px rgba(0,0,0,.06)}
+  h1{margin:0 0 8px;font-size:28px}
+  p{color:#64748b;line-height:1.5}
+  .drop{margin-top:18px;border:2px dashed #9fb2c8;border-radius:12px;padding:38px 20px;text-align:center;cursor:pointer;background:#fbfdff}
+  .drop.drag{border-color:#2563eb;background:#eff6ff}
+  .drop b{display:block;font-size:18px}
+  .drop span{display:block;margin-top:7px;color:#64748b}
+  input{display:none}
+  .toolbar{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-top:18px}
+  button,.download{border:0;border-radius:9px;padding:11px 15px;font-weight:700;text-decoration:none;cursor:pointer}
+  button{background:#2563eb;color:white}
+  button.secondary{background:#e9eef4;color:#1f2937}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .files{margin-top:18px;display:grid;gap:9px}
+  .file{display:flex;justify-content:space-between;align-items:center;gap:14px;border:1px solid #e1e7ed;border-radius:10px;padding:11px 12px}
+  .name{font-weight:700;word-break:break-all}
+  .meta{font-size:12px;color:#64748b;margin-top:3px}
+  .status{font-size:13px;font-weight:700;white-space:nowrap}
+  .status.ok{color:#15803d}.status.err{color:#b91c1c}.status.work{color:#a16207}
+  .result{margin-top:16px;padding:12px;border:1px solid #dfe5eb;border-radius:10px;background:#fafcff}
+  .result + .result{margin-top:10px}
+  .download{display:inline-block;background:#16a34a;color:#fff;margin-top:9px}
+  .note{font-size:13px;color:#64748b;margin-top:12px}
+  .count{font-size:13px;background:#eef4ff;color:#1e40af;border-radius:999px;padding:7px 10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>WooCommerce CSV Image Remover</h1>
+    <p>Upload any WooCommerce product export. This tool removes only the values from the <b>Images</b> column. Product rows, variations, prices, stock, attributes, brands, tags, descriptions, and every other field stay untouched.</p>
+
+    <label id="drop" class="drop">
+      <input id="fileInput" type="file" accept=".csv,text/csv" multiple>
+      <b>Drop CSV file(s) here</b>
+      <span>or click here to select</span>
+    </label>
+
+    <div class="toolbar">
+      <span id="count" class="count">0 files selected</span>
+      <div>
+        <button id="clearBtn" class="secondary" disabled>Clear</button>
+        <button id="processBtn" disabled>Remove Images &amp; Create CSV</button>
+      </div>
+    </div>
+
+    <div id="files" class="files"></div>
+    <div id="results"></div>
+
+    <div class="note">
+      Everything runs locally in this browser. Nothing is uploaded. The generated filename will be
+      <b>original-name-no-images.csv</b>.
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const queue = [];
+  const $ = id => document.getElementById(id);
+
+  const input = $('fileInput');
+  const drop = $('drop');
+  const filesBox = $('files');
+  const resultsBox = $('results');
+  const processBtn = $('processBtn');
+  const clearBtn = $('clearBtn');
+  const count = $('count');
+
+  input.addEventListener('change', () => addFiles([...input.files]));
+  drop.addEventListener('click', () => input.click());
+
+  for (const evt of ['dragenter','dragover']) {
+    drop.addEventListener(evt, e => { e.preventDefault(); drop.classList.add('drag'); });
+  }
+  for (const evt of ['dragleave','drop']) {
+    drop.addEventListener(evt, e => { e.preventDefault(); drop.classList.remove('drag'); });
+  }
+  drop.addEventListener('drop', e => addFiles([...e.dataTransfer.files]));
+
+  clearBtn.addEventListener('click', () => {
+    queue.length = 0;
+    input.value = '';
+    resultsBox.innerHTML = '';
+    render();
+  });
+
+  processBtn.addEventListener('click', processAll);
+
+  function addFiles(files) {
+    for (const file of files) {
+      if (!/\.csv$/i.test(file.name)) continue;
+      if (!queue.some(f => f.name === file.name && f.size === file.size && f.lastModified === file.lastModified)) {
+        queue.push(file);
+      }
+    }
+    render();
+  }
+
+  function render() {
+    count.textContent = `${queue.length} file${queue.length === 1 ? '' : 's'} selected`;
+    processBtn.disabled = queue.length === 0;
+    clearBtn.disabled = queue.length === 0;
+    filesBox.innerHTML = '';
+    queue.forEach((file, i) => {
+      const row = document.createElement('div');
+      row.className = 'file';
+      row.innerHTML = `
+        <div>
+          <div class="name">${esc(file.name)}</div>
+          <div class="meta">${bytes(file.size)}</div>
+        </div>
+        <div id="status-${i}" class="status">Ready</div>
+      `;
+      filesBox.appendChild(row);
+    });
+  }
+
+  async function processAll() {
+    processBtn.disabled = true;
+    clearBtn.disabled = true;
+    resultsBox.innerHTML = '';
+
+    for (let i = 0; i < queue.length; i++) {
+      setStatus(i, 'Processing…', 'work');
+      await new Promise(r => setTimeout(r, 0));
+
+      try {
+        const result = await cleanWooCSV(queue[i]);
+        const blob = new Blob([result.text], { type: 'text/csv;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+
+        const box = document.createElement('div');
+        box.className = 'result';
+        box.innerHTML = `
+          <b>${esc(result.outputName)}</b><br>
+          Processed ${result.dataRows.toLocaleString()} data row(s); cleared Images in ${result.cleared.toLocaleString()} row(s).
+          <br><a class="download" href="${url}" download="${escAttr(result.outputName)}">Download cleaned CSV</a>
+        `;
+        resultsBox.appendChild(box);
+        setStatus(i, 'Done ✓', 'ok');
+      } catch (err) {
+        setStatus(i, 'Failed: ' + err.message, 'err');
+      }
+    }
+
+    clearBtn.disabled = queue.length === 0;
+    processBtn.disabled = queue.length === 0;
+  }
+
+  async function cleanWooCSV(file) {
+    const buffer = await file.arrayBuffer();
+    const text = decode(buffer);
+
+    if (!text.length) throw new Error('File is empty.');
+
+    const delimiter = detectDelimiter(text);
+    const header = parseFirstRow(text, delimiter);
+
+    if (!header.fields.length) throw new Error('Could not read CSV header.');
+
+    const imageIndex = header.fields.findIndex(v => cleanHeader(v) === 'images');
+    if (imageIndex < 0) {
+      throw new Error('No "Images" column was found.');
+    }
+
+    const spans = findColumnSpans(text, delimiter, imageIndex, header.end);
+    if (!spans.length) throw new Error('No product/variation rows found.');
+
+    let out = text;
+    for (let i = spans.length - 1; i >= 0; i--) {
+      const [start, end] = spans[i];
+      out = out.slice(0, start) + out.slice(end);
+    }
+
+    // Keep UTF-8 BOM because WooCommerce accepts it and Excel handles it.
+    const outputName = file.name.replace(/\.csv$/i, '') + '-no-images.csv';
+
+    return {
+      text: out,
+      outputName,
+      dataRows: countDataRows(text, header.end),
+      cleared: spans.length
+    };
+  }
+
+  function decode(buffer) {
+    const bytes = new Uint8Array(buffer);
+    try {
+      return new TextDecoder('utf-8', {fatal:true}).decode(bytes);
+    } catch (_) {
+      try {
+        return new TextDecoder('windows-1252').decode(bytes);
+      } catch (_) {
+        return new TextDecoder('utf-8').decode(bytes);
+      }
+    }
+  }
+
+  function detectDelimiter(text) {
+    const sample = text.slice(0, Math.min(text.length, 16000));
+    let best = ',', bestScore = -1;
+
+    for (const d of [',', ';', '\t']) {
+      let score = 0, inQuotes = false;
+      for (let i = 0; i < sample.length; i++) {
+        const c = sample[i];
+        if (c === '"') {
+          if (inQuotes && sample[i + 1] === '"') i++;
+          else inQuotes = !inQuotes;
+        } else if (!inQuotes && c === d) {
+          score++;
+        } else if (!inQuotes && (c === '\n' || c === '\r')) {
+          if (score > bestScore) { bestScore = score; best = d; }
+          score = 0;
+          if (c === '\r' && sample[i + 1] === '\n') i++;
+        }
+      }
+    }
+    return best;
+  }
+
+  function parseFirstRow(text, delimiter) {
+    const fields = [];
+    let start = 0, i = 0, inQuotes = false;
+
+    for (; i < text.length; i++) {
+      const c = text[i];
+      if (inQuotes) {
+        if (c === '"') {
+          if (text[i + 1] === '"') i++;
+          else inQuotes = false;
+        }
+        continue;
+      }
+
+      if (c === '"') { inQuotes = true; continue; }
+
+      if (c === delimiter) {
+        fields.push(unquoteCSV(text.slice(start, i)));
+        start = i + 1;
+        continue;
+      }
+
+      if (c === '\n' || c === '\r') {
+        fields.push(unquoteCSV(text.slice(start, i)));
+        let end = i + 1;
+        if (c === '\r' && text[end] === '\n') end++;
+        return { fields, end };
+      }
+    }
+
+    fields.push(unquoteCSV(text.slice(start)));
+    return { fields, end: text.length };
+  }
+
+  function unquoteCSV(s) {
+    s = s.replace(/^\uFEFF/, '');
+    if (s.length >= 2 && s[0] === '"' && s[s.length - 1] === '"') {
+      return s.slice(1, -1).replace(/""/g, '"');
+    }
+    return s;
+  }
+
+  function cleanHeader(s) {
+    return String(s ?? '').replace(/^\uFEFF/, '').trim().toLowerCase();
+  }
+
+  /*
+    Returns raw [start,end] spans for the Images field in every data row.
+    Only those exact spans are deleted. All other bytes/chars remain unchanged.
+    This avoids re-serializing the whole CSV, so variations and complex
+    WooCommerce fields are preserved exactly as exported.
+  */
+  function findColumnSpans(text, delimiter, targetIndex, startPos) {
+    const spans = [];
+    let i = startPos;
+    let fieldStart = i;
+    let fieldIndex = 0;
+    let inQuotes = false;
+    let rowHasAny = false;
+
+    while (i < text.length) {
+      const c = text[i];
+
+      if (inQuotes) {
+        if (c === '"') {
+          if (text[i + 1] === '"') {
+            i += 2;
+            continue;
+          }
+          inQuotes = false;
+        }
+        i++;
+        continue;
+      }
+
+      if (c === '"' && i === fieldStart) {
+        inQuotes = true;
+        i++;
+        rowHasAny = true;
+        continue;
+      }
+
+      if (c === delimiter) {
+        if (fieldIndex === targetIndex) {
+          spans.push([fieldStart, i]);
+        }
+        fieldIndex++;
+        fieldStart = i + 1;
+        rowHasAny = true;
+        i++;
+        continue;
+      }
+
+      if (c === '\n' || c === '\r') {
+        if (fieldIndex === targetIndex) {
+          spans.push([fieldStart, i]);
+        }
+        if (rowHasAny || i > fieldStart || fieldIndex > 0) {
+          // completed one data row
+        }
+        fieldIndex = 0;
+        rowHasAny = false;
+        let next = i + 1;
+        if (c === '\r' && text[next] === '\n') next++;
+        i = next;
+        fieldStart = i;
+        continue;
+      }
+
+      rowHasAny = true;
+      i++;
+    }
+
+    if (fieldStart < text.length || fieldIndex > 0 || rowHasAny) {
+      if (fieldIndex === targetIndex) spans.push([fieldStart, text.length]);
+    }
+
+    return spans;
+  }
+
+  function countDataRows(text, headerEnd) {
+    let count = 0, inQuotes = false, hasData = false;
+    for (let i = headerEnd; i < text.length; i++) {
+      const c = text[i];
+      if (inQuotes) {
+        if (c === '"') {
+          if (text[i + 1] === '"') i++;
+          else inQuotes = false;
+        }
+      } else if (c === '"' && !hasData) {
+        inQuotes = true; hasData = true;
+      } else if (c === '\r' || c === '\n') {
+        if (hasData) count++;
+        hasData = false;
+        if (c === '\r' && text[i + 1] === '\n') i++;
+      } else if (c !== delimiterGuess(text)) {
+        hasData = true;
+      }
+    }
+    if (hasData) count++;
+    return count;
+  }
+
+  let cachedDelimiter = null;
+  function delimiterGuess(text) {
+    if (!cachedDelimiter) cachedDelimiter = detectDelimiter(text);
+    return cachedDelimiter;
+  }
+
+  function setStatus(i, text, cls) {
+    const el = $('status-' + i);
+    if (el) {
+      el.textContent = text;
+      el.className = 'status ' + cls;
+    }
+  }
+
+  function bytes(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1024*1024) return (n/1024).toFixed(1) + ' KB';
+    if (n < 1024*1024*1024) return (n/1024/1024).toFixed(1) + ' MB';
+    return (n/1024/1024/1024).toFixed(1) + ' GB';
+  }
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+    }[c]));
+  }
+
+  function escAttr(s) {
+    return esc(s);
+  }
+})();
+</script>
+</body>
+</html>
